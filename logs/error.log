@@ -31,3 +31,13 @@
   message: '❌ Error connecting to MySQL database:',
   timestamp: '2025-11-19 13:54:29'
 }
+{
+  service: 'hotel-management-api',
+  query: 'SELECT id FROM users WHERE email = ? OR username = ?',
+  params: [ 'buru@gmail.com', null ],
+  error: "Unknown column 'username' in 'WHERE'",
+  code: 'ER_BAD_FIELD_ERROR',
+  level: 'error',
+  message: 'Database query error:',
+  timestamp: '2025-11-19 14:56:07'
+}

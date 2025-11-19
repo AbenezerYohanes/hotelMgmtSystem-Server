@@ -1,27 +1,27 @@
 const express = require('express');
 const { body, validationResult } = require('express-validator');
-const { query } = require('../database/config');
 const { isManager } = require('../middleware/auth');
+// Mongoose models
+let RoomType = null, Room = null, Booking = null;
+try {
+  RoomType = require('../models/RoomType');
+  Room = require('../models/Room');
+  Booking = require('../models/Booking');
+} catch (e) {
+  RoomType = null; Room = null; Booking = null;
+}
 
 const router = express.Router();
 
 // Get all room types
 router.get('/types', async (req, res) => {
   try {
-    const result = await query(`
-      SELECT * FROM room_types ORDER BY base_price
-    `);
-
-    res.json({
-      success: true,
-      data: result.rows
-    });
+    if (!RoomType) return res.status(500).json({ success: false, message: 'Room types not available (MongoDB models missing)' });
+    const types = await RoomType.find().sort('base_price').lean();
+    res.json({ success: true, data: types });
   } catch (error) {
     console.error('Room types error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Error fetching room types' 
-    });
+    res.status(500).json({ success: false, message: 'Error fetching room types' });
   }
 });
 
@@ -45,16 +45,9 @@ router.post('/types', isManager, [
 
     const { name, description, base_price, capacity, amenities } = req.body;
 
-    const result = await query(
-      'INSERT INTO room_types (name, description, base_price, capacity, amenities) VALUES (?, ?, ?, ?, ?)',
-      [name, description, base_price, capacity, JSON.stringify(amenities || [])]
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'Room type created successfully',
-      data: { id: result.insertId || (result.rows && result.rows.insertId) }
-    });
+    if (!RoomType) return res.status(500).json({ success: false, message: 'Room types not available (MongoDB models missing)' });
+    const created = await RoomType.create({ name, description, base_price, capacity, amenities: amenities || [] });
+    res.status(201).json({ success: true, message: 'Room type created successfully', data: { id: created._id } });
   } catch (error) {
     console.error('Room type creation error:', error);
     res.status(500).json({ 
@@ -85,29 +78,10 @@ router.put('/types/:id', isManager, [
     const { id } = req.params;
     const { name, description, base_price, capacity, amenities } = req.body;
 
-    const result = await query(
-      `UPDATE room_types SET 
-       name = COALESCE(?, name),
-       description = COALESCE(?, description),
-       base_price = COALESCE(?, base_price),
-       capacity = COALESCE(?, capacity),
-       amenities = COALESCE(?, amenities)
-       WHERE id = ?`,
-      [name, description, base_price, capacity, amenities ? JSON.stringify(amenities) : null, id]
-    );
-
-    if ((result.affectedRows || (result.rows && result.rows.affectedRows)) === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Room type not found' 
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Room type updated successfully',
-      data: req.body
-    });
+    if (!RoomType) return res.status(500).json({ success: false, message: 'Room types not available (MongoDB models missing)' });
+    const updated = await RoomType.findByIdAndUpdate(id, { $set: { name, description, base_price, capacity, amenities: amenities ? amenities : undefined } }, { new: true }).lean();
+    if (!updated) return res.status(404).json({ success: false, message: 'Room type not found' });
+    res.json({ success: true, message: 'Room type updated successfully', data: updated });
   } catch (error) {
     console.error('Room type update error:', error);
     res.status(500).json({ 
@@ -120,63 +94,21 @@ router.put('/types/:id', isManager, [
 // Get all rooms
 router.get('/', async (req, res) => {
   try {
+    if (!Room) return res.status(500).json({ success: false, message: 'Rooms model not available (MongoDB models missing)' });
     const { page = 1, limit = 10, status, room_type_id, floor } = req.query;
-    const offset = (page - 1) * limit;
-
-    let whereClause = 'WHERE 1=1';
-    const params = [];
-
-    if (status) {
-      whereClause += ' AND r.status = ?';
-      params.push(status);
-    }
-
-    if (room_type_id) {
-      whereClause += ' AND r.room_type_id = ?';
-      params.push(room_type_id);
-    }
-
-    if (floor) {
-      whereClause += ' AND r.floor = ?';
-      params.push(floor);
-    }
-
-    const result = await query(
-      `SELECT r.*, rt.name as room_type, rt.base_price, rt.capacity, rt.amenities
-       FROM rooms r
-       LEFT JOIN room_types rt ON r.room_type_id = rt.id
-       ${whereClause}
-       ORDER BY r.room_number
-       LIMIT ? OFFSET ?`,
-      [...params, Number(limit), Number(offset)]
-    );
-
-    // Get total count
-    const countResult = await query(
-      `SELECT COUNT(*) as total
-       FROM rooms r
-       ${whereClause}`,
-      params
-    );
-
-  const total = parseInt(countResult.rows[0].total);
-
-    res.json({
-      success: true,
-      data: result.rows,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total,
-        pages: Math.ceil(total / limit)
-      }
-    });
+    const skip = (Number(page) - 1) * Number(limit);
+    const filter = {};
+    if (status) filter.status = status;
+    if (floor) filter.floor = Number(floor);
+    if (room_type_id) filter.room_type = room_type_id;
+    const [items, total] = await Promise.all([
+      Room.find(filter).populate('room_type').sort('room_number').limit(Number(limit)).skip(skip).lean(),
+      Room.countDocuments(filter)
+    ]);
+    res.json({ success: true, data: items, pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / Number(limit)) } });
   } catch (error) {
     console.error('Rooms error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Error fetching rooms' 
-    });
+    res.status(500).json({ success: false, message: 'Error fetching rooms' });
   }
 });
 
@@ -199,29 +131,11 @@ router.post('/', isManager, [
 
     const { room_number, room_type_id, floor, notes } = req.body;
 
-    // Check if room number already exists
-    const existingRoom = await query(
-      'SELECT id FROM rooms WHERE room_number = ?',
-      [room_number]
-    );
-
-  if (existingRoom.rows && existingRoom.rows.length > 0) {
-      return res.status(409).json({ 
-        success: false, 
-        message: 'Room number already exists' 
-      });
-    }
-
-    const result = await query(
-      'INSERT INTO rooms (room_number, room_type_id, floor, notes) VALUES (?, ?, ?, ?)',
-      [room_number, room_type_id, floor, notes]
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'Room created successfully',
-      data: { id: result.insertId || (result.rows && result.rows.insertId) }
-    });
+    if (!Room) return res.status(500).json({ success: false, message: 'Rooms model not available (MongoDB models missing)' });
+    const existingRoom = await Room.findOne({ room_number }).lean();
+    if (existingRoom) return res.status(409).json({ success: false, message: 'Room number already exists' });
+    const created = await Room.create({ room_number, room_type: room_type_id, floor, notes });
+    res.status(201).json({ success: true, message: 'Room created successfully', data: { id: created._id } });
   } catch (error) {
     console.error('Room creation error:', error);
     res.status(500).json({ 
@@ -253,83 +167,19 @@ router.put('/:id', isManager, [
     const { id } = req.params;
     const { room_number, room_type_id, floor, status, is_clean, notes } = req.body;
 
-    // Check if room number already exists (if being changed)
+    if (!Room) return res.status(500).json({ success: false, message: 'Rooms model not available (MongoDB models missing)' });
     if (room_number) {
-      const existingRoom = await query(
-        'SELECT id FROM rooms WHERE room_number = ? AND id != ?',
-        [room_number, id]
-      );
-
-      if (existingRoom.rows && existingRoom.rows.length > 0) {
-        return res.status(409).json({ 
-          success: false, 
-          message: 'Room number already exists' 
-        });
-      }
+      const existingRoom = await Room.findOne({ room_number, _id: { $ne: id } }).lean();
+      if (existingRoom) return res.status(409).json({ success: false, message: 'Room number already exists' });
     }
-
-    const result = await query(
-      `UPDATE rooms SET 
-       room_number = COALESCE(?, room_number),
-       room_type_id = COALESCE(?, room_type_id),
-       floor = COALESCE(?, floor),
-       status = COALESCE(?, status),
-       is_clean = COALESCE(?, is_clean),
-       notes = COALESCE(?, notes),
-       updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [room_number, room_type_id, floor, status, is_clean, notes, id]
-    );
-
-    if ((result.affectedRows || (result.rows && result.rows.affectedRows)) === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Room not found' 
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Room updated successfully',
-      data: req.body
-    });
+    const updated = await Room.findByIdAndUpdate(id, { $set: { room_number, room_type: room_type_id, floor, status, is_clean, notes } }, { new: true }).lean();
+    if (!updated) return res.status(404).json({ success: false, message: 'Room not found' });
+    res.json({ success: true, message: 'Room updated successfully', data: updated });
   } catch (error) {
     console.error('Room update error:', error);
     res.status(500).json({ 
       success: false, 
       message: 'Error updating room' 
-    });
-  }
-});
-
-// Get room details
-router.get('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const result = await query(
-      `SELECT r.*, rt.name as room_type, rt.base_price, rt.capacity, rt.amenities
-       FROM rooms r
-       LEFT JOIN room_types rt ON r.room_type_id = rt.id
-       WHERE r.id = ?`,
-      [id]
-    );
-
-    if (!result.rows || result.rows.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Room not found' 
-      });
-    }
-    res.json({
-      success: true,
-      data: result.rows[0]
-    });
-  } catch (error) {
-    console.error('Room details error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Error fetching room details' 
     });
   }
 });
@@ -346,38 +196,24 @@ router.get('/availability', async (req, res) => {
       });
     }
 
-    let whereClause = 'WHERE 1=1';
-    const params = [check_in_date, check_out_date];
-
-    if (room_type_id) {
-      whereClause += ' AND r.room_type_id = ?';
-      params.push(room_type_id);
-    }
-
-    const result = await query(
-      `SELECT r.*, rt.name as room_type, rt.base_price, rt.capacity, rt.amenities
-       FROM rooms r
-       LEFT JOIN room_types rt ON r.room_type_id = rt.id
-       WHERE r.id NOT IN (
-         SELECT DISTINCT room_id
-         FROM bookings
-         WHERE status IN ('confirmed', 'checked_in')
-         AND (
-           (check_in_date <= ? AND check_out_date > ?) OR
-           (check_in_date < ? AND check_out_date >= ?) OR
-           (check_in_date >= ? AND check_out_date <= ?)
-         )
-       )
-       ${room_type_id ? 'AND r.room_type_id = ?' : ''}
-       AND r.status = 'available'
-       ORDER BY r.room_number`,
-      room_type_id ? [...params, ...params, ...params, room_type_id] : [...params, ...params, ...params]
-    );
-
-    res.json({
-      success: true,
-      data: result.rows
-    });
+    if (!Room || !Booking) return res.status(500).json({ success: false, message: 'Models not available (MongoDB models missing)' });
+    const checkIn = new Date(check_in_date);
+    const checkOut = new Date(check_out_date);
+    // Find bookings that overlap and are confirmed/checked_in
+    const overlapping = await Booking.find({
+      status: { $in: ['confirmed','checked_in'] },
+      $or: [
+        { check_in_date: { $lte: checkIn }, check_out_date: { $gt: checkIn } },
+        { check_in_date: { $lt: checkOut }, check_out_date: { $gte: checkOut } },
+        { check_in_date: { $gte: checkIn }, check_out_date: { $lte: checkOut } }
+      ]
+    }).select('room_id').lean();
+    const bookedRoomIds = overlapping.map(b => String(b.room_id));
+    const filter = { status: 'available' };
+    if (room_type_id) filter.room_type = room_type_id;
+    if (bookedRoomIds.length > 0) filter._id = { $nin: bookedRoomIds };
+    const rooms = await Room.find(filter).populate('room_type').sort('room_number').lean();
+    res.json({ success: true, data: rooms });
   } catch (error) {
     console.error('Room availability error:', error);
     res.status(500).json({ 
@@ -387,49 +223,41 @@ router.get('/availability', async (req, res) => {
   }
 });
 
+// Get room details
+router.get('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!Room) return res.status(500).json({ success: false, message: 'Rooms model not available (MongoDB models missing)' });
+    const room = await Room.findById(id).populate('room_type').lean();
+    if (!room) return res.status(404).json({ success: false, message: 'Room not found' });
+    res.json({ success: true, data: room });
+  } catch (error) {
+    console.error('Room details error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error fetching room details' 
+    });
+  }
+});
+
 // Get room dashboard statistics
 router.get('/dashboard/stats', async (req, res) => {
   try {
     // Total rooms
-    const totalRooms = await query('SELECT COUNT(*) as count FROM rooms');
-    
-    // Available rooms
-    const availableRooms = await query("SELECT COUNT(*) as count FROM rooms WHERE status = 'available'");
-    
-    // Occupied rooms
-    const occupiedRooms = await query("SELECT COUNT(*) as count FROM rooms WHERE status = 'occupied'");
-    
-    // Maintenance rooms
-    const maintenanceRooms = await query("SELECT COUNT(*) as count FROM rooms WHERE status = 'maintenance'");
-    
-    // Rooms by type
-    const roomsByType = await query(`
-      SELECT rt.name, COUNT(r.id) as count
-      FROM room_types rt
-      LEFT JOIN rooms r ON rt.id = r.room_type_id
-      GROUP BY rt.id, rt.name
-      ORDER BY count DESC
-    `);
-
-    // Occupancy rate
-    const occupancyRate = await query(`
-      SELECT ROUND(
-        (COUNT(CASE WHEN status = 'occupied' THEN 1 END) * 100.0 / COUNT(*)
-      ), 2) as rate
-      FROM rooms
-    `);
-
-    res.json({
-      success: true,
-      data: {
-        totalRooms: parseInt(totalRooms.rows[0].count),
-        availableRooms: parseInt(availableRooms.rows[0].count),
-        occupiedRooms: parseInt(occupiedRooms.rows[0].count),
-        maintenanceRooms: parseInt(maintenanceRooms.rows[0].count),
-        roomsByType: roomsByType.rows,
-        occupancyRate: parseFloat(occupancyRate.rows[0].rate || 0)
-      }
-    });
+    if (!Room) return res.status(500).json({ success: false, message: 'Rooms model not available (MongoDB models missing)' });
+    const totalRooms = await Room.countDocuments();
+    const availableRooms = await Room.countDocuments({ status: 'available' });
+    const occupiedRooms = await Room.countDocuments({ status: 'occupied' });
+    const maintenanceRooms = await Room.countDocuments({ status: 'maintenance' });
+    const roomsByType = await Room.aggregate([
+      { $lookup: { from: 'roomtypes', localField: 'room_type', foreignField: '_id', as: 'rt' } },
+      { $unwind: { path: '$rt', preserveNullAndEmptyArrays: true } },
+      { $group: { _id: '$room_type', name: { $first: '$rt.name' }, count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
+    ]);
+    const occupancyRate = totalRooms === 0 ? 0 : (occupiedRooms * 100.0) / totalRooms;
+    res.json({ success: true, data: { totalRooms, availableRooms, occupiedRooms, maintenanceRooms, roomsByType, occupancyRate } });
   } catch (error) {
     console.error('Room dashboard error:', error);
     res.status(500).json({ 

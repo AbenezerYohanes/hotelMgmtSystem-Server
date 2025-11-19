@@ -3,6 +3,9 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const { query } = require('../database/config');
+// If MongoDB is available, prefer mongoose-backed User model
+let UserMongo = null;
+try { UserMongo = require('../models/User'); } catch (e) { UserMongo = null; }
 const { authenticateToken } = require('../middleware/auth');
 const { requireRole, requirePrivilege } = require('../middleware/rbac');
 const { auditLog } = require('../middleware/audit');
@@ -42,17 +45,20 @@ router.post('/register', [
     if (role === 'superadmin') role = 'super_admin';
     if (role === 'user') role = 'client';
 
-    // Check if user already exists
-    const existingUser = await query(
-      'SELECT id FROM users WHERE email = ? OR username = ?',
-      [email, username || null]
-    );
-
-    if (existingUser.rows.length > 0) {
-      return res.status(409).json({
-        success: false,
-        message: 'Email already exists'
-      });
+    // Check if user already exists (Mongo or MySQL)
+    if (UserMongo) {
+      const found = await UserMongo.findOne({ $or: [{ email }, { username: username || null }] }).lean();
+      if (found) {
+        return res.status(409).json({ success: false, message: 'Email or username already exists' });
+      }
+    } else {
+      const existingUser = await query(
+        'SELECT id FROM users WHERE email = ? OR username = ?',
+        [email, username || null]
+      );
+      if (existingUser.rows.length > 0) {
+        return res.status(409).json({ success: false, message: 'Email already exists' });
+      }
     }
 
     // Only super_admin can create admin accounts
@@ -88,23 +94,39 @@ router.post('/register', [
     // Override with provided privileges if any
     const userPrivileges = req.body.privileges ? { ...defaultPrivileges, ...req.body.privileges } : defaultPrivileges;
 
-    // Create user
-    const result = await query(
-      `INSERT INTO users (username, email, password_hash, first_name, last_name, role, privileges, is_active, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [username || null, email, passwordHash, first_name || null, last_name || null, role, JSON.stringify(userPrivileges), true, req.user?.id || null]
-    );
+    // Create user (MongoDB if available else MySQL)
+    let user = null;
+    if (UserMongo) {
+      const u = new UserMongo({
+        username: username || null,
+        email,
+        password_hash: passwordHash,
+        first_name: first_name || null,
+        last_name: last_name || null,
+        role,
+        privileges: userPrivileges,
+        is_active: true,
+        created_by: req.user?.id || null
+      });
+      user = await u.save();
+    } else {
+      const result = await query(
+        `INSERT INTO users (username, email, password_hash, first_name, last_name, role, privileges, is_active, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [username || null, email, passwordHash, first_name || null, last_name || null, role, JSON.stringify(userPrivileges), true, req.user?.id || null]
+      );
 
-    // Get the inserted user
-    const userResult = await query(
-      'SELECT id, email, username, first_name, last_name, role, privileges, is_active FROM users WHERE id = ?',
-      [result.insertId]
-    );
+      // Get the inserted user
+      const userResult = await query(
+        'SELECT id, email, username, first_name, last_name, role, privileges, is_active FROM users WHERE id = ?',
+        [result.insertId]
+      );
 
-    const user = userResult.rows[0];
+      user = userResult.rows[0];
+    }
 
     // Audit log
-    await auditLog('user_created', req.user?.id || user.id, user.id, {
+    await auditLog('user_created', req.user?.id || (user._id || user.id), (user._id || user.id), {
       new_user_role: role,
       privileges: userPrivileges
     });
@@ -114,7 +136,7 @@ router.post('/register', [
       message: 'User created successfully',
       data: {
         user: {
-          id: user.id,
+          id: user._id || user.id,
           email: user.email,
           username: user.username,
           first_name: user.first_name,
@@ -134,7 +156,7 @@ router.post('/register', [
   }
 });
 
-// Login user
+// Login user (MongoDB-backed)
 router.post('/login', [
   body('email').optional().isEmail().withMessage('Valid email is required'),
   body('username').optional().notEmpty().withMessage('Username cannot be empty'),
@@ -150,6 +172,10 @@ router.post('/login', [
       });
     }
 
+    if (!UserMongo) {
+      return res.status(500).json({ success: false, message: 'Authentication not configured (MongoDB unavailable)' });
+    }
+
     const { email, username, password } = req.body;
     if (!email && !username) {
       return res.status(400).json({ success: false, message: 'Email or username is required' });
@@ -158,55 +184,38 @@ router.post('/login', [
     const identifier = email || username;
 
     // Find user by email OR username
-    const result = await query(
-      'SELECT id, email, password_hash, username, first_name, last_name, role, privileges, is_active FROM users WHERE email = ? OR username = ?',
-      [identifier, identifier]
-    );
+    const user = await UserMongo.findOne({ $or: [{ email: identifier }, { username: identifier }] }).lean();
 
-    if (result.rows.length === 0) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
+    if (!user) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
-    const user = result.rows[0];
-
     if (!user.is_active) {
-      return res.status(401).json({
-        success: false,
-        message: 'Account is suspended or deactivated'
-      });
+      return res.status(401).json({ success: false, message: 'Account is suspended or deactivated' });
     }
 
     // Verify password
     const isValidPassword = await bcrypt.compare(password, user.password_hash);
     if (!isValidPassword) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials'
-      });
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
     // Generate JWT token
     const token = jwt.sign(
-      { userId: user.id, role: user.role, privileges: user.privileges },
+      { userId: String(user._id), role: user.role, privileges: user.privileges },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
 
     // Audit log
-    await auditLog('user_login', user.id, null, {
-      email: user.email,
-      role: user.role
-    });
+    await auditLog('user_login', String(user._id), null, { email: user.email, role: user.role });
 
     res.json({
       success: true,
       message: 'Login successful',
       data: {
         user: {
-          id: user.id,
+          id: String(user._id),
           email: user.email,
           username: user.username,
           first_name: user.first_name,
@@ -220,38 +229,20 @@ router.post('/login', [
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error during login'
-    });
+    res.status(500).json({ success: false, message: 'Error during login' });
   }
 });
 
 // Get current user profile
 router.get('/profile', authenticateToken, async (req, res) => {
   try {
-    const result = await query(
-      'SELECT id, email, username, first_name, last_name, role, privileges, is_active, created_at FROM users WHERE id = ?',
-      [req.user.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      data: result.rows[0]
-    });
+    if (!UserMongo) return res.status(500).json({ success: false, message: 'Profile not available (MongoDB unavailable)' });
+    const user = await UserMongo.findById(req.user.userId).select('email username first_name last_name role privileges is_active created_at').lean();
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    res.json({ success: true, data: user });
   } catch (error) {
     console.error('Profile error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error fetching profile'
-    });
+    res.status(500).json({ success: false, message: 'Error fetching profile' });
   }
 });
 
@@ -261,50 +252,16 @@ router.put('/profile', authenticateToken, [
   body('last_name').optional().notEmpty().withMessage('Last name cannot be empty')
 ], async (req, res) => {
   try {
+    if (!UserMongo) return res.status(500).json({ success: false, message: 'Profile update not available (MongoDB unavailable)' });
     const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation error',
-        errors: errors.array()
-      });
-    }
-
+    if (!errors.isEmpty()) return res.status(400).json({ success: false, message: 'Validation error', errors: errors.array() });
     const { first_name, last_name } = req.body;
-
-    const result = await query(
-      `UPDATE users SET
-       first_name = COALESCE(?, first_name),
-       last_name = COALESCE(?, last_name),
-       updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [first_name || null, last_name || null, req.user.id]
-    );
-
-    // Get updated user data
-    const updatedUser = await query(
-      'SELECT id, email, username, first_name, last_name, role, privileges, is_active FROM users WHERE id = ?',
-      [req.user.id]
-    );
-
-    if (updatedUser.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    res.json({
-      success: true,
-      message: 'Profile updated successfully',
-      data: updatedUser.rows[0]
-    });
+    const updated = await UserMongo.findByIdAndUpdate(req.user.userId, { $set: { first_name: first_name || undefined, last_name: last_name || undefined } }, { new: true, select: 'email username first_name last_name role privileges is_active' }).lean();
+    if (!updated) return res.status(404).json({ success: false, message: 'User not found' });
+    res.json({ success: true, message: 'Profile updated successfully', data: updated });
   } catch (error) {
     console.error('Profile update error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error updating profile'
-    });
+    res.status(500).json({ success: false, message: 'Error updating profile' });
   }
 });
 
@@ -314,59 +271,22 @@ router.put('/change-password', authenticateToken, [
   body('new_password').isLength({ min: 6 }).withMessage('New password must be at least 6 characters')
 ], async (req, res) => {
   try {
+    if (!UserMongo) return res.status(500).json({ success: false, message: 'Password change not available (MongoDB unavailable)' });
     const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation error',
-        errors: errors.array()
-      });
-    }
-
+    if (!errors.isEmpty()) return res.status(400).json({ success: false, message: 'Validation error', errors: errors.array() });
     const { current_password, new_password } = req.body;
-
-    // Get current password hash
-    const result = await query(
-      'SELECT password_hash FROM users WHERE id = ?',
-      [req.user.id]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'User not found'
-      });
-    }
-
-    // Verify current password
-    const isValidPassword = await bcrypt.compare(current_password, result.rows[0].password_hash);
-    if (!isValidPassword) {
-      return res.status(401).json({
-        success: false,
-        message: 'Current password is incorrect'
-      });
-    }
-
-    // Hash new password
+    const user = await UserMongo.findById(req.user.userId).select('password_hash');
+    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
+    const isValidPassword = await bcrypt.compare(current_password, user.password_hash);
+    if (!isValidPassword) return res.status(401).json({ success: false, message: 'Current password is incorrect' });
     const saltRounds = 10;
     const newPasswordHash = await bcrypt.hash(new_password, saltRounds);
-
-    // Update password
-    await query(
-      'UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [newPasswordHash, req.user.id]
-    );
-
-    res.json({
-      success: true,
-      message: 'Password changed successfully'
-    });
+    user.password_hash = newPasswordHash;
+    await user.save();
+    res.json({ success: true, message: 'Password changed successfully' });
   } catch (error) {
     console.error('Password change error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error changing password'
-    });
+    res.status(500).json({ success: false, message: 'Error changing password' });
   }
 });
 

@@ -1,4 +1,12 @@
 const { query } = require('../database/config');
+let UserModel = null;
+let mongoose = null;
+try {
+  UserModel = require('../models/User');
+  mongoose = require('mongoose');
+} catch (e) {
+  UserModel = null;
+}
 
 // Role hierarchy: super_admin > admin > manager > staff > client
 const ROLE_HIERARCHY = {
@@ -64,8 +72,8 @@ const requirePrivilege = (privilege) => {
       });
     }
 
-    // Superadmin has all privileges
-    if (req.user.role === 'superadmin') {
+    // Superadmin has all privileges (normalize role)
+    if (hasRole(req.user.role, 'super_admin')) {
       return next();
     }
 
@@ -99,21 +107,25 @@ const canManageUser = (targetUserId) => {
     // Admin can manage users with lower roles
     if (String(req.user.role).toLowerCase().replace(/\s+/g, '_') === 'admin') {
       try {
-        const result = await query(
-          'SELECT role FROM users WHERE id = ?',
-          [targetUserId]
-        );
-
-        if (result.rows.length === 0) {
-          return res.status(404).json({
-            success: false,
-            message: 'User not found'
-          });
-        }
-
-        const targetRole = result.rows[0].role;
-        if (hasRole(req.user.role, targetRole) && req.user.role !== targetRole) {
-          return next();
+        // If Mongo user model available and connected, use it
+        if (UserModel && mongoose && mongoose.connection && mongoose.connection.readyState === 1) {
+          const target = await UserModel.findById(targetUserId).select('role').lean();
+          if (!target) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+          }
+          const targetRole = target.role;
+          if (hasRole(req.user.role, targetRole) && req.user.role !== targetRole) {
+            return next();
+          }
+        } else {
+          const result = await query('SELECT role FROM users WHERE id = ?', [targetUserId]);
+          if (!result.rows || result.rows.length === 0) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+          }
+          const targetRole = result.rows[0].role;
+          if (hasRole(req.user.role, targetRole) && req.user.role !== targetRole) {
+            return next();
+          }
         }
       } catch (error) {
         console.error('Error checking user management permissions:', error);

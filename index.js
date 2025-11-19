@@ -8,6 +8,15 @@ const path = require('path');
 const fs = require('fs');
 require('dotenv').config({ path: __dirname + '/.env' });
 
+// Initialize MongoDB (optional). If MONGO_URI is set, connect.
+const { connect: connectMongo } = require('./database/mongo');
+if (process.env.MONGO_URI || process.env.NODE_ENV === 'development') {
+  // connect but don't block startup; log connection result
+  connectMongo().catch((err) => {
+    console.error('Mongo connection failed:', err && err.message);
+  });
+}
+
 // Import routes
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
@@ -72,14 +81,33 @@ app.use(helmet({
   },
 }));
 app.use(compression());
+// Configure CORS origins via environment variable `CORS_ORIGIN` (comma-separated).
+// Example: CORS_ORIGIN="http://localhost:3000,https://app.example.com"
+const rawCors = process.env.CORS_ORIGIN;
+const defaultLocal = 'http://localhost:3000,http://localhost:3001';
+const allowedOrigins = (rawCors || (process.env.NODE_ENV === 'production' ? 'https://yourdomain.com,https://your-frontend-domain.com' : defaultLocal))
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// Use the cors middleware with a dynamic origin function so we only allow configured origins
 app.use(cors({
-  origin: process.env.NODE_ENV === 'production'
-    ? ['https://yourdomain.com', 'https://your-frontend-domain.com']
-    : ['http://localhost:3000', 'http://localhost:3001', 'http://192.168.1.10:3000'],
+  origin: function (origin, callback) {
+    // Allow non-browser requests like curl/postman which have no origin
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.indexOf('*') !== -1) return callback(null, true);
+    if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
+    return callback(new Error('CORS policy: Origin not allowed'), false);
+  },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 }));
+
+// Explicitly handle preflight responses for clarity (some hosting/platforms need this)
+app.options('*', (req, res) => {
+  res.sendStatus(204);
+});
 app.use(limiter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
