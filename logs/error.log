@@ -41,3 +41,10 @@
   message: 'Database query error:',
   timestamp: '2025-11-19 14:56:07'
 }
+{
+  service: 'hotel-management-api',
+  error: 'connect ETIMEDOUT 159.41.67.40:27017',
+  level: 'error',
+  message: '❌ MongoDB connection error',
+  timestamp: '2025-11-19 23:34:26'
+}

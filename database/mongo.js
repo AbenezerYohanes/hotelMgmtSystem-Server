@@ -21,3 +21,10 @@ const connect = async () => {
 };
 
 module.exports = { connect, mongoose };
+const { MongoClient } = require('mongodb');
+
+const uri = 'mongodb+srv://abenezeryohannes12_db_user:MuPzvTV5L3mLo1bZ@cluster0.uqh3rz1.mongodb.net/?appName=Cluster0';
+
+const client = new MongoClient(uri, { useNewUrlParser: true, useUnifiedTopology: true });
+
+module.exports = client;

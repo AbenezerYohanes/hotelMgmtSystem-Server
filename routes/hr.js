@@ -181,8 +181,7 @@ router.get('/employees', async (req, res) => {
       return res.json({ success: true, data: items, pagination: { page: Number(page), limit: Number(limit), total, pages: Math.ceil(total / Number(limit)) } });
     }
 
-    const { page = 1, limit = 10, department_id: dept_q, status: status_q } = req.query;
-    const offset2 = (page - 1) * limit;
+    // reuse `page`, `limit`, `department_id`, `status` from above
 
     let whereClause = 'WHERE 1=1';
     const params = [];
