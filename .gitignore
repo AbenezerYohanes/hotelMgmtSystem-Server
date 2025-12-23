@@ -1,0 +1,72 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+
+# Build outputs
+dist/
+build/
+.cache/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+server.log
+combined.log
+error.log
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+dev.sqlite
+*.sql.backup
+
+# Uploads (keep structure, ignore content)
+uploads/profiles/*
+uploads/documents/*
+uploads/room-images/*
+!uploads/profiles/.gitkeep
+!uploads/documents/.gitkeep
+!uploads/room-images/.gitkeep
+
+# Testing
+coverage/
+.nyc_output/
+*.lcov
+.jest/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Misc
+*.pid
+*.seed
+*.pid.lock
